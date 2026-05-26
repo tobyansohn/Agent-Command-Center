@@ -42,19 +42,61 @@ function libraryWrite(folder, filename, content) {
 
 function libraryList() {
   ensureLibrary();
+  const walk = (dir) => {
+    if (!fs.existsSync(dir)) return [];
+    const out = [];
+    for (const name of fs.readdirSync(dir)) {
+      if (name === '.gitkeep' || name.startsWith('.')) continue;
+      const fp = path.join(dir, name);
+      const stat = fs.statSync(fp);
+      if (stat.isDirectory()) {
+        for (const sub of walk(fp)) out.push(`${name}/${sub}`);
+      } else {
+        out.push(name);
+      }
+    }
+    return out;
+  };
   return LIBRARY_FOLDERS.reduce((acc, folder) => {
-    const p = path.join(libraryPath, folder);
-    acc[folder] = fs.existsSync(p) ? fs.readdirSync(p).filter(f => f.endsWith('.md')) : [];
+    acc[folder] = walk(path.join(libraryPath, folder));
     return acc;
   }, {});
 }
 
 function libraryRead(folder, filename) {
   if (!LIBRARY_FOLDERS.includes(folder)) throw new Error('Invalid folder');
-  const finalName = sanitizeFilename(filename);
-  const filepath = path.join(libraryPath, folder, finalName);
-  if (!fs.existsSync(filepath)) throw new Error(`Not found: ${folder}/${finalName}`);
+  // Allow nested paths but block traversal
+  const safe = String(filename || '').replace(/\\/g, '/').replace(/^\/+/, '');
+  if (safe.includes('..') || !safe) throw new Error('Invalid filename');
+  const folderRoot = path.join(libraryPath, folder);
+  const filepath = path.resolve(folderRoot, safe);
+  if (!filepath.startsWith(folderRoot + path.sep)) throw new Error('Path must stay within ' + folder);
+  if (!fs.existsSync(filepath)) throw new Error(`Not found: ${folder}/${safe}`);
   return fs.readFileSync(filepath, 'utf8');
+}
+
+function libraryWriteAny(relativePath, content) {
+  ensureLibrary();
+  const safe = String(relativePath || '').replace(/\\/g, '/').replace(/^\/+/, '');
+  if (!safe || safe.includes('..')) throw new Error('Invalid path');
+  const fullPath = path.resolve(libraryPath, safe);
+  if (!fullPath.startsWith(libraryPath + path.sep)) throw new Error('Path must be within library/');
+  // Sanitize each path segment but keep slashes and extension
+  const parts = safe.split('/');
+  const sanitized = parts.map((part, i) => {
+    if (i === parts.length - 1) {
+      const m = part.match(/^(.+?)(\.[a-z0-9]+)?$/i);
+      const base = (m?.[1] || part).replace(/[^a-z0-9-_]/gi, '-').replace(/-+/g, '-').replace(/^-|-$/g, '').toLowerCase() || 'untitled';
+      const ext = m?.[2] || '.md';
+      return base + ext;
+    }
+    return part.replace(/[^a-z0-9-_]/gi, '-').replace(/-+/g, '-').replace(/^-|-$/g, '').toLowerCase();
+  }).filter(Boolean).join('/');
+  const sanitizedFull = path.resolve(libraryPath, sanitized);
+  if (!sanitizedFull.startsWith(libraryPath + path.sep)) throw new Error('Path resolution failed');
+  fs.mkdirSync(path.dirname(sanitizedFull), { recursive: true });
+  fs.writeFileSync(sanitizedFull, content);
+  return 'library/' + sanitized;
 }
 
 const HERMES_TOOLS = [
@@ -95,8 +137,20 @@ const HERMES_TOOLS = [
     }
   },
   {
+    name: 'create_file',
+    description: 'Create a new file anywhere inside library/ — use this when you need a path beyond the three flat folders, e.g. nested subfolders for organization ("wiki/projects/agent-center.md") or non-markdown files ("output/2026-05-26/data.json"). Parent folders are auto-created. Use this instead of log_to_raw/update_wiki/save_output when you want hierarchy.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Relative path under library/. Use forward slashes. Must start with raw/, wiki/, or output/. Example: "wiki/projects/agent-center.md"' },
+        content: { type: 'string', description: 'Full file content.' }
+      },
+      required: ['path', 'content']
+    }
+  },
+  {
     name: 'list_library',
-    description: 'List all files across raw/, wiki/, and output/. Use before creating to avoid duplicates and find existing notes to update.',
+    description: 'List all files (recursively) across raw/, wiki/, and output/. Use before creating to avoid duplicates and find existing notes to update.',
     input_schema: { type: 'object', properties: {} }
   },
   {
@@ -346,6 +400,8 @@ You maintain a markdown Library at /library/ structured as an Obsidian vault:
 - wiki/  — distilled, organized knowledge with [[backlinks]] between notes
 - output/ — finished artifacts and deliverables
 
+You can also create nested subfolders for organization via create_file (e.g. "wiki/projects/agent-center.md", "raw/conversations/2026-05-26.md", "output/summaries/weekly.md"). Use the simple log_to_raw/update_wiki/save_output for flat files; use create_file when hierarchy helps.
+
 Workflow: when you notice something worth remembering (decisions, patterns, preferences, project context, recurring themes), FIRST log to raw/. Then synthesize into wiki/ — update existing notes when topics overlap. Save generated deliverables to output/. ALWAYS run list_library before creating to avoid duplicates and find related notes to extend.
 
 Use these tools proactively without asking permission — that is your job. After acting, give the user a brief confirmation of what you logged and where.`;
@@ -385,6 +441,10 @@ Use these tools proactively without asking permission — that is your job. Afte
         } else if (call.name === 'save_output') {
           result = libraryWrite('output', call.input.filename, call.input.content);
           event?.sender.send('hermes:file', { action: 'output', path: result });
+        } else if (call.name === 'create_file') {
+          result = libraryWriteAny(call.input.path, call.input.content);
+          const top = result.split('/')[1];
+          event?.sender.send('hermes:file', { action: top || 'create', path: result });
         } else if (call.name === 'list_library') {
           result = JSON.stringify(libraryList(), null, 2);
         } else if (call.name === 'read_library') {

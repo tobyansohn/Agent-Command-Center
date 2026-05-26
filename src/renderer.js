@@ -16,12 +16,53 @@ async function init() {
   renderWorldMap();
   renderSidebar();
   setupWindowControls();
-  setupResizeHandle();
+  setupSidebarResize();
+  setupFullscreenToggle();
+  setupTabs();
   window.api.onConsulting(handleConsulting);
   window.api.onConsulted(handleConsulted);
   window.api.onClarifyQ(handleClarifyQ);
   window.api.onClarifyA(handleClarifyA);
+  window.api.onStreamStart(handleStreamStart);
+  window.api.onStreamDelta(handleStreamDelta);
+  window.api.onStreamEnd(handleStreamEnd);
   window.api.onHermesFile(handleHermesFile);
+}
+
+// ── Oracle Streaming ──────────────────────────────────────────
+let streamingBubble = null;
+let streamingBuffer = '';
+let streamedAnyText = false;
+
+function handleStreamStart() {
+  // New Oracle turn — close any prior bubble so next delta opens a fresh one
+  streamingBubble = null;
+  streamingBuffer = '';
+}
+
+function handleStreamDelta(data) {
+  streamedAnyText = true;
+  if (!streamingBubble) {
+    // First delta of this turn — drop the typing indicator and create the bubble
+    if (activeIndicator) { activeIndicator.remove(); activeIndicator = null; }
+    const oracle = agents.find(a => a.id === 'oracle');
+    const container = document.getElementById('gc-messages');
+    const wrap = document.createElement('div');
+    wrap.className = 'msg assistant';
+    wrap.innerHTML = `
+      <div class="msg-sender" style="color:${oracle.color}">${oracle.emoji} ${oracle.name}</div>
+      <div class="msg-bubble" style="--msg-color:${oracle.color}"></div>`;
+    container.appendChild(wrap);
+    streamingBubble = wrap.querySelector('.msg-bubble');
+  }
+  streamingBuffer += data.delta;
+  streamingBubble.innerHTML = formatContent(streamingBuffer);
+  const container = document.getElementById('gc-messages');
+  container.scrollTop = container.scrollHeight;
+}
+
+function handleStreamEnd() {
+  streamingBubble = null;
 }
 
 function handleClarifyQ(data) {
@@ -60,13 +101,9 @@ function appendGCClarifyA(agent, answer) {
 }
 
 function handleHermesFile(data) {
-  const card = document.getElementById('card-hermes');
-  if (!card) return;
-  const msgs = card.querySelector('.ac-messages');
-  if (!msgs) return;
+  // Hermes auto-logging surfaces in the general chat as a subtle system note
   const icon = { raw: '📥', wiki: '📚', output: '📤' }[data.action] || '📄';
-  appendACSystemMsg(msgs, `${icon} ${data.path}`);
-  msgs.scrollTop = msgs.scrollHeight;
+  appendGCSystemMsg(`📜 ${icon} ${data.path}`);
 }
 
 // ── World Map ─────────────────────────────────────────────────
@@ -125,13 +162,17 @@ function startWorldRoaming() {
   const intervals = [4000, 4300, 3800, 4600, 4200];
   const delays    = [200, 800, 1400, 500, 1100];
   worldRoamers.forEach((roamer, i) => {
+    // Modulo so any number of agents stays staggered (was crashing past index 4)
     setTimeout(() => {
       moveMapSprite(roamer);
-      const t = setInterval(() => moveMapSprite(roamer), intervals[i]);
+      const t = setInterval(() => moveMapSprite(roamer), intervals[i % intervals.length]);
       worldRoamTimers.push(t);
-    }, delays[i]);
+    }, delays[i % delays.length] + i * 200);
   });
 }
+
+// Track agents whose sprites are completely missing — skip future frame loads for them
+const brokenSpriteAgents = new Set();
 
 function stopWorldRoaming() {
   if (worldFrameTimer) { clearInterval(worldFrameTimer); worldFrameTimer = null; }
@@ -154,11 +195,31 @@ function moveMapSprite(sprite) {
 }
 
 function updateMapFrame(sprite) {
+  // Once we know an agent has no sprite assets, stop trying
+  if (brokenSpriteAgents.has(sprite.agentId)) {
+    if (sprite.el.style.display !== 'none') sprite.el.style.display = 'none';
+    return;
+  }
   const pad = String(sprite.frame).padStart(3, '0');
-  const animPath = `../assets/sprites/${sprite.agentId}/${sprite.dir}/frame_${pad}.png`;
-  const fallback = `../assets/sprites/${sprite.agentId}/${sprite.dir}.png`;
-  sprite.el.onerror = () => { sprite.el.onerror = null; sprite.el.src = fallback; };
-  sprite.el.src = animPath;
+  const tryPaths = [
+    `../assets/sprites/${sprite.agentId}/${sprite.dir}/frame_${pad}.png`,
+    `../assets/sprites/${sprite.agentId}/${sprite.dir}.png`,
+    `../assets/sprites/${sprite.agentId}.png`
+  ];
+  let idx = 0;
+  const tryNext = () => {
+    idx++;
+    if (idx >= tryPaths.length) {
+      // All fallbacks failed — mark agent as broken and stop hammering
+      brokenSpriteAgents.add(sprite.agentId);
+      sprite.el.style.display = 'none';
+      sprite.el.onerror = null;
+      return;
+    }
+    sprite.el.src = tryPaths[idx];
+  };
+  sprite.el.onerror = tryNext;
+  sprite.el.src = tryPaths[0];
 }
 
 function angleTo8Dir(deg) {
@@ -175,7 +236,7 @@ function angleTo8Dir(deg) {
 // ── Sidebar ───────────────────────────────────────────────────
 function renderSidebar() {
   const agentList = document.getElementById('agent-list');
-  agentList.innerHTML = '<div class="section-header"><span class="section-title">AGENTS</span></div>';
+  agentList.innerHTML = '';
 
   const councillors = agents.filter(a => !a.isCouncil);
   councillors.forEach(agent => {
@@ -190,30 +251,11 @@ function renderSidebar() {
         <span class="ac-emoji">${agent.emoji}</span>
         <div class="ac-info">
           <div class="ac-name">${agent.name}</div>
-          <div class="ac-title">${agent.title}</div>
+          <div class="ac-title">${agent.title}${agent.location ? ' · ' + agent.location : ''}</div>
+          ${agent.pokemon ? `<div class="ac-pokemon">#${agent.pokemon}</div>` : ''}
         </div>
-        <button class="ac-toggle">▼</button>
       </div>
-      <div class="ac-chat hidden">
-        <div class="ac-messages"></div>
-        <div class="chat-input-area">
-          <textarea class="ac-input chat-textarea" placeholder="Ask ${agent.name}..." rows="1"></textarea>
-          <button class="ac-send chat-send">→</button>
-        </div>
-      </div>`;
-
-    card.querySelector('.ac-header').addEventListener('click', () => toggleAgentCard(agent, card));
-
-    const input = card.querySelector('.ac-input');
-    const sendBtn = card.querySelector('.ac-send');
-    input.addEventListener('input', () => {
-      input.style.height = 'auto';
-      input.style.height = Math.min(input.scrollHeight, 80) + 'px';
-    });
-    input.addEventListener('keydown', e => {
-      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMiniMessage(agent, card); }
-    });
-    sendBtn.addEventListener('click', () => sendMiniMessage(agent, card));
+      <div class="ac-description">${agent.description || ''}</div>`;
 
     agentList.appendChild(card);
   });
@@ -233,55 +275,16 @@ function renderSidebar() {
   appendGCSystemMsg('Claude is here. Ask anything.');
 }
 
-async function toggleAgentCard(agent, card) {
-  const chat = card.querySelector('.ac-chat');
-  const isHidden = chat.classList.contains('hidden');
-
-  if (isHidden) {
-    chat.classList.remove('hidden');
-    card.classList.add('expanded');
-    const msgs = card.querySelector('.ac-messages');
-    if (msgs.children.length === 0) {
-      const history = await window.api.getMemory(agent.id);
-      if (history.length === 0) {
-        appendACSystemMsg(msgs, `${agent.emoji} ${agent.name} ready`);
-      } else {
-        history.forEach(m => appendACMsg(msgs, m.role, m.content, agent));
-        msgs.scrollTop = msgs.scrollHeight;
-      }
-    }
-    card.querySelector('.ac-input').focus();
-  } else {
-    chat.classList.add('hidden');
-    card.classList.remove('expanded');
-  }
-}
-
-async function sendMiniMessage(agent, card) {
-  const input = card.querySelector('.ac-input');
-  const sendBtn = card.querySelector('.ac-send');
-  const msgs = card.querySelector('.ac-messages');
-  const text = input.value.trim();
-  if (!text) return;
-
-  input.value = '';
-  input.style.height = 'auto';
-  sendBtn.disabled = true;
-
-  appendACMsg(msgs, 'user', text, agent);
-  const indicator = appendACTyping(msgs, agent);
-
-  try {
-    const reply = await window.api.sendMessage(agent.id, text);
-    indicator.remove();
-    appendACMsg(msgs, 'assistant', reply, agent);
-  } catch (err) {
-    indicator.remove();
-    appendACSystemMsg(msgs, `Error: ${err.message}`);
-  }
-
-  sendBtn.disabled = false;
-  input.focus();
+function setupTabs() {
+  const tabs = document.querySelectorAll('.tab-btn');
+  const panes = document.querySelectorAll('.tab-pane');
+  tabs.forEach(btn => {
+    btn.addEventListener('click', () => {
+      const target = btn.getAttribute('data-tab');
+      tabs.forEach(t => t.classList.toggle('active', t === btn));
+      panes.forEach(p => p.classList.toggle('active', p.id === `tab-${target}`));
+    });
+  });
 }
 
 // ── General Chat ──────────────────────────────────────────────
@@ -299,12 +302,16 @@ async function sendGeneralMessage() {
 
   appendGCUserMsg(text);
   activeIndicator = appendGCTyping();
+  streamedAnyText = false;
 
   try {
     const result = await window.api.routeMessage(text);
     if (activeIndicator) { activeIndicator.remove(); activeIndicator = null; }
-    const oracle = agents.find(a => a.id === 'oracle');
-    if (result.finalReply) appendGCAgentMsg(oracle, result.finalReply);
+    // If streaming painted text, the bubble's already there — skip duplicate render
+    if (!streamedAnyText && result.finalReply) {
+      const oracle = agents.find(a => a.id === 'oracle');
+      appendGCAgentMsg(oracle, result.finalReply);
+    }
   } catch (err) {
     if (activeIndicator) { activeIndicator.remove(); activeIndicator = null; }
     appendGCSystemMsg(`Error: ${err.message}`);
@@ -385,36 +392,6 @@ function appendGCTyping(color) {
   return el;
 }
 
-// ── Mini Chat DOM Helpers ─────────────────────────────────────
-function appendACMsg(container, role, content, agent) {
-  const el = document.createElement('div');
-  el.className = `msg ${role}`;
-  const senderStyle = role === 'assistant' ? `style="color:${agent.color}"` : '';
-  const bubbleStyle = role === 'assistant' ? `style="--msg-color:${agent.color}"` : '';
-  el.innerHTML = `
-    <div class="msg-sender" ${senderStyle}>${role === 'user' ? 'You' : `${agent.emoji} ${agent.name}`}</div>
-    <div class="msg-bubble" ${bubbleStyle}>${formatContent(content)}</div>`;
-  container.appendChild(el);
-  container.scrollTop = container.scrollHeight;
-}
-
-function appendACSystemMsg(container, text) {
-  const el = document.createElement('div');
-  el.className = 'system-note';
-  el.textContent = `— ${text} —`;
-  container.appendChild(el);
-}
-
-function appendACTyping(container, agent) {
-  const el = document.createElement('div');
-  el.className = 'typing-indicator';
-  el.style.setProperty('--room-color', agent.color);
-  el.innerHTML = '<div class="typing-dot"></div><div class="typing-dot"></div><div class="typing-dot"></div>';
-  container.appendChild(el);
-  container.scrollTop = container.scrollHeight;
-  return el;
-}
-
 // ── Content Formatting ────────────────────────────────────────
 function formatContent(text) {
   text = text.replace(/```(\w*)\n?([\s\S]*?)```/g, (_, lang, code) => `<pre><code>${escapeHtml(code.trim())}</code></pre>`);
@@ -428,33 +405,34 @@ function escapeHtml(str) {
   return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-// ── Resize Handle ─────────────────────────────────────────────
-function setupResizeHandle() {
-  const handle = document.getElementById('gc-resize');
-  const chat = document.getElementById('general-chat');
+// ── Sidebar Horizontal Resize ─────────────────────────────────
+function setupSidebarResize() {
+  const handle = document.getElementById('sidebar-resize');
   const sidebar = document.getElementById('sidebar');
-  if (!handle || !chat || !sidebar) return;
+  const app = document.getElementById('app');
+  if (!handle || !sidebar) return;
 
   let dragging = false;
-  let startY = 0;
-  let startH = 0;
+  let startX = 0;
+  let startW = 0;
 
   handle.addEventListener('mousedown', e => {
+    if (app.classList.contains('sidebar-full')) return;
     dragging = true;
-    startY = e.clientY;
-    startH = chat.getBoundingClientRect().height;
+    startX = e.clientX;
+    startW = sidebar.getBoundingClientRect().width;
     handle.classList.add('dragging');
-    document.body.style.cursor = 'row-resize';
+    document.body.style.cursor = 'col-resize';
     document.body.style.userSelect = 'none';
     e.preventDefault();
   });
 
   document.addEventListener('mousemove', e => {
     if (!dragging) return;
-    const sidebarH = sidebar.getBoundingClientRect().height;
-    const newH = startH + (e.clientY - startY);
-    const clamped = Math.max(120, Math.min(sidebarH - 140, newH));
-    chat.style.height = clamped + 'px';
+    // Sidebar is on the right, so dragging LEFT increases width
+    const newW = startW + (startX - e.clientX);
+    const max = window.innerWidth - 200;
+    sidebar.style.width = Math.max(260, Math.min(max, newW)) + 'px';
   });
 
   document.addEventListener('mouseup', () => {
@@ -465,18 +443,22 @@ function setupResizeHandle() {
     document.body.style.userSelect = '';
   });
 
-  // Double-click to maximize the chat (with toggle back)
-  let savedH = null;
+  // Double-click handle to reset to default width
   handle.addEventListener('dblclick', () => {
-    const sidebarH = sidebar.getBoundingClientRect().height;
-    const current = chat.getBoundingClientRect().height;
-    if (savedH !== null) {
-      chat.style.height = savedH + 'px';
-      savedH = null;
-    } else {
-      savedH = current;
-      chat.style.height = (sidebarH - 140) + 'px';
-    }
+    if (app.classList.contains('sidebar-full')) return;
+    sidebar.style.width = '340px';
+  });
+}
+
+// ── Fullscreen Toggle ─────────────────────────────────────────
+function setupFullscreenToggle() {
+  const btn = document.getElementById('btn-gc-expand');
+  const app = document.getElementById('app');
+  if (!btn || !app) return;
+  btn.addEventListener('click', () => {
+    const isFull = app.classList.toggle('sidebar-full');
+    btn.textContent = isFull ? '⤢' : '⛶';
+    btn.title = isFull ? 'Exit fullscreen' : 'Toggle fullscreen';
   });
 }
 

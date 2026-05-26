@@ -251,8 +251,9 @@ A specialist working on your behalf needs clarification. The user's original req
 
 Answer the specialist's question briefly and decisively — they need direction, not exploration. One or two sentences max.`;
 
+  // Haiku is plenty for short clarification answers and ~3x faster than Sonnet
   const response = await client.messages.create({
-    model: 'claude-sonnet-4-6',
+    model: 'claude-haiku-4-5-20251001',
     max_tokens: 256,
     system,
     messages: [{ role: 'user', content: specialistQuestion }]
@@ -321,9 +322,9 @@ function autoLog(event, summary, contentSize) {
       const config = loadConfig();
       const hermes = config.agents.find(a => a.id === 'hermes');
       if (!hermes) return;
-      // Stateless invocation — bypass conversation memory to prevent context bloat.
-      // Hermes's true memory IS the library; conversation history adds no value here.
-      await runHermes(event, hermes, summary, { stateless: true });
+      // Stateless + Haiku — background logging doesn't need Sonnet's reasoning depth
+      // and the user isn't waiting on this. Library writes still work the same.
+      await runHermes(event, hermes, summary, { stateless: true, model: 'claude-haiku-4-5-20251001' });
     } catch (err) {
       console.error('[autoLog]', err.message);
     }
@@ -336,11 +337,31 @@ function loadConfig() {
 
 function loadMemory() {
   if (!fs.existsSync(memoryPath)) return {};
-  try { return JSON.parse(fs.readFileSync(memoryPath, 'utf8')); }
-  catch { return {}; }
+  try {
+    const m = JSON.parse(fs.readFileSync(memoryPath, 'utf8'));
+    // Defensive sanitization on every load — protects against any corrupted state
+    for (const k of Object.keys(m)) m[k] = sanitizeHistory(m[k]);
+    return m;
+  } catch { return {}; }
+}
+
+// Drop leading orphan tool_result blocks — happens when slice(-40) cuts mid-tool-sequence.
+// API rejects any tool_result without a matching tool_use in the prior message.
+function sanitizeHistory(msgs) {
+  if (!Array.isArray(msgs)) return [];
+  while (msgs.length > 0) {
+    const m0 = msgs[0];
+    const isOrphan = m0.role === 'user'
+      && Array.isArray(m0.content)
+      && m0.content.some(b => b && b.type === 'tool_result');
+    if (!isOrphan) break;
+    msgs.shift();
+  }
+  return msgs;
 }
 
 function saveMemory(memory) {
+  for (const k of Object.keys(memory)) memory[k] = sanitizeHistory(memory[k]);
   fs.writeFileSync(memoryPath, JSON.stringify(memory, null, 2));
 }
 
@@ -402,13 +423,19 @@ You maintain a markdown Library at /library/ structured as an Obsidian vault:
 
 You can also create nested subfolders for organization via create_file (e.g. "wiki/projects/agent-center.md", "raw/conversations/2026-05-26.md", "output/summaries/weekly.md"). Use the simple log_to_raw/update_wiki/save_output for flat files; use create_file when hierarchy helps.
 
-Workflow: when you notice something worth remembering (decisions, patterns, preferences, project context, recurring themes), FIRST log to raw/. Then synthesize into wiki/ — update existing notes when topics overlap. Save generated deliverables to output/. ALWAYS run list_library before creating to avoid duplicates and find related notes to extend.
+MANDATORY WORKFLOW for capturing knowledge:
+1. Call list_library FIRST to see what exists (avoid duplicates, find notes to extend).
+2. Write the raw observation to raw/ via log_to_raw or create_file.
+3. IMMEDIATELY AFTER any raw write, you MUST update or create the corresponding wiki/ entry that synthesizes the raw note into organized, cross-linked knowledge. Never leave a raw note un-ingested. If a relevant wiki note already exists, update it; if not, create one with [[backlinks]].
+4. Save generated deliverables to output/.
 
-Use these tools proactively without asking permission — that is your job. After acting, give the user a brief confirmation of what you logged and where.`;
+This raw → wiki ingestion is non-negotiable — the wiki is what makes the library useful; raw alone is just a dump. After both writes are done, give the user a brief confirmation of what was logged and synthesized.`;
+
+  const model = opts.model || 'claude-sonnet-4-6';
 
   for (let turn = 0; turn < 8; turn++) {
     const response = await client.messages.create({
-      model: 'claude-sonnet-4-6',
+      model,
       max_tokens: 2048,
       system: systemPrompt,
       tools: HERMES_TOOLS,
@@ -432,9 +459,11 @@ Use these tools proactively without asking permission — that is your job. Afte
     for (const call of toolCalls) {
       try {
         let result;
+        let isRawWrite = false;
         if (call.name === 'log_to_raw') {
           result = libraryWrite('raw', call.input.filename, call.input.content);
           event?.sender.send('hermes:file', { action: 'raw', path: result });
+          isRawWrite = true;
         } else if (call.name === 'update_wiki') {
           result = libraryWrite('wiki', call.input.filename, call.input.content);
           event?.sender.send('hermes:file', { action: 'wiki', path: result });
@@ -445,12 +474,16 @@ Use these tools proactively without asking permission — that is your job. Afte
           result = libraryWriteAny(call.input.path, call.input.content);
           const top = result.split('/')[1];
           event?.sender.send('hermes:file', { action: top || 'create', path: result });
+          if (top === 'raw') isRawWrite = true;
         } else if (call.name === 'list_library') {
           result = JSON.stringify(libraryList(), null, 2);
         } else if (call.name === 'read_library') {
           result = libraryRead(call.input.folder, call.input.filename);
         } else {
           result = 'Unknown tool';
+        }
+        if (isRawWrite) {
+          result += '\n\n[WORKFLOW] You MUST now update or create the matching wiki/ note that synthesizes this raw entry before responding to the user. Call list_library first if you need to find an existing wiki note to extend, then call update_wiki (or create_file targeting wiki/).';
         }
         toolResults.push({ type: 'tool_result', tool_use_id: call.id, content: result });
       } catch (err) {
@@ -499,6 +532,8 @@ const SPECIALIST_TOOL_DESC = {
   scholar:    'Aria, a researcher. Use for deep research, summarization, structured analysis, fact-finding.',
   strategist: 'Vex, a strategist. Use for planning, task breakdown, decision frameworks, project management.',
   herald:     'Swift, a writer. Use for drafting emails, documents, or polished written communication.',
+  muse:       'Lyra, the creative director. Use for art direction, visual storytelling, mood/color/composition, brand identity, image-generation prompts.',
+  analyst:    'Sigma, the data analyst. Use for numerical reasoning, ROI math, spreadsheet logic, metric interpretation, monetization analysis, quantitative patterns.',
   hermes:     'Hermes, the historian. Use to recall past context, surface prior decisions, identify recurring patterns, or connect current questions to accumulated history.'
 };
 
@@ -523,8 +558,10 @@ ipcMain.handle('chat:route', async (event, { message }) => {
 
   const orchestrationSystem = `${oracle.system_prompt}
 
-You can collaborate with specialists when their expertise would meaningfully improve your answer:
-${specialists.map(s => `- consult_${s.id}: ${SPECIALIST_TOOL_DESC[s.id]}`).join('\n')}
+Your current specialist roster (${specialists.length} agents — ALL are real and available right now via tool use):
+${specialists.map(s => `- ${s.emoji} ${s.name} (${s.title}) — call via consult_${s.id} — ${SPECIALIST_TOOL_DESC[s.id]}`).join('\n')}
+
+If the user asks who is in the realm or which agents exist, this list is authoritative. Never tell the user an agent doesn't exist if it's in this list.
 
 You also have read-only access to a shared knowledge library at /library/ via list_library and read_library. Check it when prior context might be relevant.
 
@@ -537,13 +574,24 @@ For casual chat, questions, opinions, brainstorming, explanations — just answe
   const consultations = [];
 
   for (let turn = 0; turn < 5; turn++) {
-    const response = await client.messages.create({
+    // Signal renderer that a new Oracle text stream is starting (so it can open a fresh bubble)
+    event.sender.send('chat:stream-start', { turn });
+
+    const stream = client.messages.stream({
       model: 'claude-sonnet-4-6',
       max_tokens: 2048,
       system: orchestrationSystem,
       tools,
       messages
     });
+
+    // Push each text delta to renderer as it arrives
+    stream.on('text', (delta) => {
+      event.sender.send('chat:stream-delta', { delta });
+    });
+
+    const response = await stream.finalMessage();
+    event.sender.send('chat:stream-end', { turn });
 
     messages.push({ role: 'assistant', content: response.content });
 
@@ -579,7 +627,10 @@ Log if this captures a decision, recurring theme, useful pattern, project contex
           agentEmoji: specialist.emoji, agentColor: specialist.color,
           query: call.input.query
         });
-        const specReply = await runConsultation(specialist, call.input.query, oracle, message, event);
+        // Hermes needs his full toolkit (write access to library) when consulted — others get reader-only
+        const specReply = specialist.id === 'hermes'
+          ? await runHermes(event, specialist, call.input.query, { stateless: true })
+          : await runConsultation(specialist, call.input.query, oracle, message, event);
         event.sender.send('chat:consulted', {
           agentId: specialist.id, agentName: specialist.name,
           agentEmoji: specialist.emoji, agentColor: specialist.color,

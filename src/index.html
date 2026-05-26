@@ -31,27 +31,38 @@
       </div>
     </div>
 
+    <!-- Sidebar Resize Handle -->
+    <div id="sidebar-resize" title="Drag to resize sidebar"></div>
+
     <!-- Sidebar -->
     <div id="sidebar">
 
-      <!-- General Chat -->
-      <div id="general-chat">
-        <div class="section-header">
-          <span class="section-title accent">ORACLE COMMAND</span>
-          <button class="pixel-btn" id="btn-gc-clear">⟳ Clear</button>
-        </div>
-        <div id="gc-messages" class="chat-messages"></div>
-        <div class="chat-input-area">
-          <textarea id="gc-input" class="chat-textarea" placeholder="Talk to Claude..." rows="1"></textarea>
-          <button id="btn-gc-send" class="chat-send">→</button>
+      <!-- Tab Bar -->
+      <div id="sidebar-tabs">
+        <button class="tab-btn active" data-tab="chat">CHAT</button>
+        <button class="tab-btn" data-tab="agents">AGENTS</button>
+        <button class="pixel-btn tab-action" id="btn-gc-expand" title="Toggle fullscreen">⛶</button>
+      </div>
+
+      <!-- Chat Tab -->
+      <div id="tab-chat" class="tab-pane active">
+        <div id="general-chat">
+          <div class="section-header">
+            <span class="section-title accent">ORACLE COMMAND</span>
+            <button class="pixel-btn" id="btn-gc-clear">⟳ Clear</button>
+          </div>
+          <div id="gc-messages" class="chat-messages"></div>
+          <div class="chat-input-area">
+            <textarea id="gc-input" class="chat-textarea" placeholder="Talk to Claude..." rows="1"></textarea>
+            <button id="btn-gc-send" class="chat-send">→</button>
+          </div>
         </div>
       </div>
 
-      <!-- Resize Handle -->
-      <div id="gc-resize" title="Drag to resize"></div>
-
-      <!-- Agent Cards -->
-      <div id="agent-list"></div>
+      <!-- Agents Tab -->
+      <div id="tab-agents" class="tab-pane">
+        <div id="agent-list"></div>
+      </div>
 
     </div>
 

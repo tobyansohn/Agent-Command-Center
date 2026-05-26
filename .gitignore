@@ -17,6 +17,9 @@ library/output/*
 !library/wiki/.gitkeep
 !library/output/.gitkeep
 
+# Obsidian per-user vault config (panel layout, recent files, etc.)
+library/.obsidian/
+
 # Raw Pixel Lab exports — sprites already copied into the canonical agent folders
 assets/Pixel_art_sprite_of_*
 assets/pixel_art_sprite_of_*

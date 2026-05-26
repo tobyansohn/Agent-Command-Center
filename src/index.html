@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>The Realm</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=VT323:wght@400&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+  <div id="titlebar">
+    <div id="titlebar-drag">
+      <span id="world-title">THE REALM</span>
+    </div>
+    <div id="titlebar-controls">
+      <button class="win-btn" id="btn-minimize">−</button>
+      <button class="win-btn" id="btn-maximize">□</button>
+      <button class="win-btn danger" id="btn-close">×</button>
+    </div>
+  </div>
+
+  <div id="app">
+
+    <!-- World Map -->
+    <div id="world-view">
+      <div id="world-map">
+        <div id="map-bg"></div>
+        <div id="locations-container"></div>
+      </div>
+    </div>
+
+    <!-- Sidebar -->
+    <div id="sidebar">
+
+      <!-- General Chat -->
+      <div id="general-chat">
+        <div class="section-header">
+          <span class="section-title accent">ORACLE COMMAND</span>
+          <button class="pixel-btn" id="btn-gc-clear">⟳ Clear</button>
+        </div>
+        <div id="gc-messages" class="chat-messages"></div>
+        <div class="chat-input-area">
+          <textarea id="gc-input" class="chat-textarea" placeholder="Talk to Claude..." rows="1"></textarea>
+          <button id="btn-gc-send" class="chat-send">→</button>
+        </div>
+      </div>
+
+      <!-- Resize Handle -->
+      <div id="gc-resize" title="Drag to resize"></div>
+
+      <!-- Agent Cards -->
+      <div id="agent-list"></div>
+
+    </div>
+
+  </div>
+
+  <script src="renderer.js"></script>
+</body>
+</html>

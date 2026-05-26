@@ -1,0 +1,39 @@
+# Secrets
+.env
+.env.local
+.env.*.local
+
+# Dependencies
+node_modules/
+
+# Personal agent state
+agents/memory.json
+
+# Hermes library — personal knowledge vault, not code
+library/raw/*
+library/wiki/*
+library/output/*
+!library/raw/.gitkeep
+!library/wiki/.gitkeep
+!library/output/.gitkeep
+
+# Raw Pixel Lab exports — sprites already copied into the canonical agent folders
+assets/Pixel_art_sprite_of_*
+assets/pixel_art_sprite_of_*
+assets/sprites/Pixel_art_sprite_of_*
+assets/sprites/pixel_art_sprite_of_*
+
+# Tooling caches
+.claude-flow/
+
+# macOS
+.DS_Store
+*.DS_Store
+
+# Logs
+*.log
+npm-debug.log*
+
+# Editor
+.vscode/
+.idea/

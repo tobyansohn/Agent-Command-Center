@@ -1,0 +1,17 @@
+{
+  "name": "rpg-command-center",
+  "version": "1.0.0",
+  "description": "AI Agent Command Center — RPG World Interface",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "ELECTRON_IS_DEV=1 electron ."
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.30.0",
+    "dotenv": "^16.4.5"
+  },
+  "devDependencies": {
+    "electron": "^31.0.0"
+  }
+}

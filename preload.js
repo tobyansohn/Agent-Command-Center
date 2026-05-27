@@ -12,6 +12,7 @@ contextBridge.exposeInMainWorld('api', {
   onConsulted:   (cb) => ipcRenderer.on('chat:consulted',   (_, data) => cb(data)),
   onClarifyQ:    (cb) => ipcRenderer.on('chat:clarify-q',   (_, data) => cb(data)),
   onClarifyA:    (cb) => ipcRenderer.on('chat:clarify-a',   (_, data) => cb(data)),
+  onRecall:      (cb) => ipcRenderer.on('chat:recall',      (_, data) => cb(data)),
   onStreamStart: (cb) => ipcRenderer.on('chat:stream-start',(_, data) => cb(data)),
   onStreamDelta: (cb) => ipcRenderer.on('chat:stream-delta',(_, data) => cb(data)),
   onStreamEnd:   (cb) => ipcRenderer.on('chat:stream-end',  (_, data) => cb(data)),

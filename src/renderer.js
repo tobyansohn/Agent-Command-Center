@@ -23,10 +23,17 @@ async function init() {
   window.api.onConsulted(handleConsulted);
   window.api.onClarifyQ(handleClarifyQ);
   window.api.onClarifyA(handleClarifyA);
+  window.api.onRecall(handleRecall);
   window.api.onStreamStart(handleStreamStart);
   window.api.onStreamDelta(handleStreamDelta);
   window.api.onStreamEnd(handleStreamEnd);
   window.api.onHermesFile(handleHermesFile);
+}
+
+function handleRecall(data) {
+  // Subtle note in the chat so user can see what context Oracle pulled in
+  if (!data.files || data.files.length === 0) return;
+  appendGCSystemMsg(`📖 recalling: ${data.files.join(', ')}`);
 }
 
 // ── Oracle Streaming ──────────────────────────────────────────
@@ -63,19 +70,23 @@ function handleStreamDelta(data) {
 
 function handleStreamEnd() {
   streamingBubble = null;
+  // If Oracle's still going (tool call coming next, or final synthesis), keep an
+  // indicator up so the user knows the request didn't die between turns.
+  if (activeIndicator) { activeIndicator.remove(); activeIndicator = null; }
+  activeIndicator = appendGCTyping('#9b59b6', 'Claude is thinking…');
 }
 
 function handleClarifyQ(data) {
   if (activeIndicator) { activeIndicator.remove(); activeIndicator = null; }
   appendGCClarifyQ(data);
-  activeIndicator = appendGCTyping('#9b59b6');
+  activeIndicator = appendGCTyping('#9b59b6', `Claude is answering ${data.agentName}…`);
 }
 
 function handleClarifyA(data) {
   if (activeIndicator) { activeIndicator.remove(); activeIndicator = null; }
   const agent = agents.find(a => a.id === data.agentId);
   appendGCClarifyA(agent, data.answer);
-  activeIndicator = appendGCTyping(agent?.color);
+  activeIndicator = appendGCTyping(agent?.color, `${agent?.name || 'Specialist'} is continuing…`);
 }
 
 function appendGCClarifyQ(data) {
@@ -119,13 +130,12 @@ function renderWorldMap() {
     box.style.setProperty('--rb-color', agent.color);
     box.style.setProperty('--rb-glow', agent.glow);
     box.style.gridArea = agent.id;
+    if (agent.background) {
+      box.style.backgroundImage = `url('../assets/${agent.background}')`;
+    }
 
     box.innerHTML = agent.isCouncil
-      ? `<div class="room-box-label">
-           <div class="room-box-name">${agent.name}</div>
-           <div class="room-box-loc">${agent.location}</div>
-         </div>
-         <div class="council-map-hint">All agents gather here</div>`
+      ? ''
       : `<div class="room-box-label">
            <div class="room-box-name">${agent.name}</div>
            <div class="room-box-loc">${agent.location}</div>
@@ -147,10 +157,13 @@ function startWorldRoaming() {
     if (!roomEl) return null;
     const el = document.createElement('img');
     el.className = 'map-sprite';
-    el.style.left = '50%';
-    el.style.top  = '45%';
+    const band = (typeof FLOOR_BANDS !== 'undefined' && FLOOR_BANDS[agent.id]) || { xMin: 40, xMax: 60, yMin: 70, yMax: 80 };
+    const startX = (band.xMin + band.xMax) / 2;
+    const startY = (band.yMin + band.yMax) / 2;
+    el.style.left = startX + '%';
+    el.style.top  = startY + '%';
     roomEl.appendChild(el);
-    const sprite = { agentId: agent.id, el, x: 50, y: 45, dir: 'south', frame: 0 };
+    const sprite = { agentId: agent.id, el, x: startX, y: startY, dir: 'south', frame: 0 };
     updateMapFrame(sprite);
     return sprite;
   }).filter(Boolean);
@@ -182,10 +195,62 @@ function stopWorldRoaming() {
   worldRoamers = [];
 }
 
+// Per-room walkable floor bands (% of room cell). Tuned to each background's
+// floor area so sprites don't clip through furniture/walls.
+const FLOOR_BANDS = {
+  oracle:     { xMin: 28, xMax: 72, yMin: 58, yMax: 88 },
+  scholar:    { xMin: 28, xMax: 72, yMin: 62, yMax: 88 },
+  smith:      { xMin: 22, xMax: 78, yMin: 58, yMax: 88 },
+  strategist: { xMin: 28, xMax: 72, yMin: 60, yMax: 88 },
+  herald:     { xMin: 22, xMax: 78, yMin: 58, yMax: 90 },
+  muse:       { xMin: 32, xMax: 68, yMin: 58, yMax: 86 },
+  analyst:    { xMin: 32, xMax: 75, yMin: 58, yMax: 88 },
+  hermes:     { xMin: 22, xMax: 75, yMin: 60, yMax: 88 },
+  council:    { xMin: 18, xMax: 82, yMin: 58, yMax: 90 }
+};
+
+// Distinct council floor slots so multiple visiting agents don't stack on top of each other
+const COUNCIL_VISITOR_SLOTS = [
+  { x: 28, y: 78 }, { x: 42, y: 82 }, { x: 58, y: 82 }, { x: 72, y: 78 },
+  { x: 32, y: 66 }, { x: 68, y: 66 }, { x: 50, y: 86 }, { x: 22, y: 70 }
+];
+let nextVisitorSlot = 0;
+
+function sendSpriteToCouncil(agentId) {
+  const sprite = worldRoamers.find(s => s.agentId === agentId);
+  const council = document.getElementById('room-box-council');
+  if (!sprite || !council) return;
+  if (!sprite.homeRoom) sprite.homeRoom = sprite.agentId;
+  sprite.currentRoom = 'council';
+  council.appendChild(sprite.el);
+  const slot = COUNCIL_VISITOR_SLOTS[nextVisitorSlot++ % COUNCIL_VISITOR_SLOTS.length];
+  sprite.x = slot.x; sprite.y = slot.y;
+  sprite.el.style.left = slot.x + '%';
+  sprite.el.style.top  = slot.y + '%';
+}
+
+function sendSpriteHome(agentId) {
+  const sprite = worldRoamers.find(s => s.agentId === agentId);
+  if (!sprite) return;
+  const homeId = sprite.homeRoom || sprite.agentId;
+  const home = document.getElementById(`room-box-${homeId}`);
+  if (!home) return;
+  sprite.currentRoom = homeId;
+  home.appendChild(sprite.el);
+  const band = FLOOR_BANDS[homeId] || { xMin: 40, xMax: 60, yMin: 70, yMax: 80 };
+  const cx = (band.xMin + band.xMax) / 2;
+  const cy = (band.yMin + band.yMax) / 2;
+  sprite.x = cx; sprite.y = cy;
+  sprite.el.style.left = cx + '%';
+  sprite.el.style.top  = cy + '%';
+}
+
 function moveMapSprite(sprite) {
   if (!sprite.el.isConnected) return;
-  const newX = 15 + Math.random() * 65;
-  const newY = 18 + Math.random() * 52;
+  const roomId = sprite.currentRoom || sprite.agentId;
+  const b = FLOOR_BANDS[roomId] || { xMin: 15, xMax: 80, yMin: 18, yMax: 70 };
+  const newX = b.xMin + Math.random() * (b.xMax - b.xMin);
+  const newY = b.yMin + Math.random() * (b.yMax - b.yMin);
   const angle = Math.atan2(newY - sprite.y, newX - sprite.x) * (180 / Math.PI);
   sprite.dir = angleTo8Dir(angle);
   sprite.frame = 0;
@@ -301,7 +366,7 @@ async function sendGeneralMessage() {
   sendBtn.disabled = true;
 
   appendGCUserMsg(text);
-  activeIndicator = appendGCTyping();
+  activeIndicator = appendGCTyping('#9b59b6', 'Claude is thinking…');
   streamedAnyText = false;
 
   try {
@@ -325,14 +390,16 @@ function handleConsulting(data) {
   if (activeIndicator) { activeIndicator.remove(); activeIndicator = null; }
   const oracle = agents.find(a => a.id === 'oracle');
   appendGCConsultNote(oracle, data);
-  activeIndicator = appendGCTyping(data.agentColor);
+  activeIndicator = appendGCTyping(data.agentColor, `${data.agentName} is thinking…`);
+  sendSpriteToCouncil(data.agentId);
 }
 
 function handleConsulted(data) {
   if (activeIndicator) { activeIndicator.remove(); activeIndicator = null; }
   const agent = agents.find(a => a.id === data.agentId);
   appendGCAgentMsg(agent, data.reply);
-  activeIndicator = appendGCTyping();
+  activeIndicator = appendGCTyping('#9b59b6', 'Claude is synthesizing…');
+  sendSpriteHome(data.agentId);
 }
 
 function clearGeneralChat() {
@@ -381,12 +448,14 @@ function appendGCSystemMsg(text) {
   container.scrollTop = container.scrollHeight;
 }
 
-function appendGCTyping(color) {
+function appendGCTyping(color, label) {
   const container = document.getElementById('gc-messages');
   const el = document.createElement('div');
   el.className = 'typing-indicator';
   el.style.setProperty('--room-color', color || '#9b59b6');
-  el.innerHTML = '<div class="typing-dot"></div><div class="typing-dot"></div><div class="typing-dot"></div>';
+  const dots = '<div class="typing-dots"><div class="typing-dot"></div><div class="typing-dot"></div><div class="typing-dot"></div></div>';
+  const text = label ? `<span class="typing-label">${escapeHtml(label)}</span>` : '';
+  el.innerHTML = dots + text;
   container.appendChild(el);
   container.scrollTop = container.scrollHeight;
   return el;
@@ -446,7 +515,7 @@ function setupSidebarResize() {
   // Double-click handle to reset to default width
   handle.addEventListener('dblclick', () => {
     if (app.classList.contains('sidebar-full')) return;
-    sidebar.style.width = '340px';
+    sidebar.style.width = '680px';
   });
 }
 

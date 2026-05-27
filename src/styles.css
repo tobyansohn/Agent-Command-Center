@@ -72,7 +72,11 @@ html, body {
   pointer-events: none; z-index: 1;
 }
 #locations-container {
-  position: absolute; inset: 0; z-index: 2;
+  position: absolute; top: 0; bottom: 0; left: 50%;
+  transform: translateX(-50%);
+  aspect-ratio: 1;
+  max-width: 100%;
+  z-index: 2;
   display: grid;
   grid-template-areas:
     "herald  oracle    strategist"
@@ -80,16 +84,26 @@ html, body {
     "muse    hermes    analyst   ";
   grid-template-rows: 1fr 1fr 1fr;
   grid-template-columns: 1fr 1fr 1fr;
-  gap: 8px;
-  padding: 14px;
+  gap: 18px;
+  padding: 20px;
 }
 
 /* ── Room Boxes ───────────────────────── */
 .room-box {
   position: relative; overflow: hidden;
   border: 1px solid rgba(255,255,255,0.07);
-  background: rgba(0,0,0,0.35);
+  background-color: rgba(0,0,0,0.35);
+  background-size: 100% 100%;
+  background-position: center;
+  background-repeat: no-repeat;
+  image-rendering: pixelated;
   cursor: default;
+}
+.room-box::before, .room-box::after, .room-box-label, .map-sprite { z-index: 2; }
+.room-box > .room-box-label {
+  background: rgba(0,0,0,0.55);
+  padding: 4px 6px;
+  border-radius: 2px;
 }
 .room-box::before, .room-box::after {
   content: ''; position: absolute; width: 8px; height: 8px;
@@ -132,18 +146,22 @@ html, body {
   position: absolute;
   width: 48px; height: 48px;
   image-rendering: pixelated;
-  transform: translate(-50%, -50%) scale(1.7);
+  transform: translate(-50%, -50%) scale(var(--sprite-scale, 3));
   transition: left 3.5s ease-in-out, top 3.5s ease-in-out;
   pointer-events: none; z-index: 1;
   filter: drop-shadow(0 3px 6px rgba(0,0,0,0.8));
 }
+#room-box-smith   { --sprite-scale: 3.8; }
+#room-box-analyst { --sprite-scale: 3.8; }
+#room-box-hermes  { --sprite-scale: 3.8; }
+#room-box-muse    { --sprite-scale: 3.8; }
 
 @keyframes fadeIn { from { opacity:0; transform:translateY(4px); } to { opacity:1; transform:translateY(0); } }
 @keyframes pulse  { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
 
 /* ── Sidebar ──────────────────────────── */
 #sidebar {
-  width: 340px; flex-shrink: 0;
+  width: 680px; flex-shrink: 0;
   display: flex; flex-direction: column;
   background: var(--bg-panel);
   overflow: hidden;
@@ -336,10 +354,16 @@ html, body {
 }
 
 .typing-indicator {
-  display: flex; gap: 4px; padding: 10px 12px;
+  display: flex; align-items: center; gap: 8px; padding: 10px 12px;
   background: rgba(0,0,0,0.35); border: 1px solid rgba(255,255,255,0.07);
   border-left: 3px solid var(--room-color, var(--accent));
   align-self: flex-start; animation: fadeIn 0.15s ease;
+}
+.typing-dots { display: flex; gap: 4px; }
+.typing-label {
+  font-family: 'VT323', monospace; font-size: 13px;
+  color: var(--text-dim); letter-spacing: 0.5px;
+  font-style: italic;
 }
 .typing-dot { width: 5px; height: 5px; background: var(--text-dim); border-radius: 50%; animation: typing 1.2s infinite; }
 .typing-dot:nth-child(2) { animation-delay: 0.2s; }

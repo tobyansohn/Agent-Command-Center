@@ -31,6 +31,20 @@ function sanitizeFilename(name) {
   return (clean || 'untitled') + '.md';
 }
 
+// Shared sanitization for nested paths — used by writeAny and read (for resolution fallback)
+function sanitizeRelativePath(safe) {
+  const parts = safe.split('/').filter(Boolean);
+  return parts.map((part, i) => {
+    if (i === parts.length - 1) {
+      const m = part.match(/^(.+?)(\.[a-z0-9]+)?$/i);
+      const base = (m?.[1] || part).replace(/[^a-z0-9-_]/gi, '-').replace(/-+/g, '-').replace(/^-|-$/g, '').toLowerCase() || 'untitled';
+      const ext = m?.[2] || '.md';
+      return base + ext;
+    }
+    return part.replace(/[^a-z0-9-_]/gi, '-').replace(/-+/g, '-').replace(/^-|-$/g, '').toLowerCase();
+  }).join('/');
+}
+
 function libraryWrite(folder, filename, content) {
   if (!LIBRARY_FOLDERS.includes(folder)) throw new Error('Invalid folder');
   ensureLibrary();
@@ -65,33 +79,97 @@ function libraryList() {
 
 function libraryRead(folder, filename) {
   if (!LIBRARY_FOLDERS.includes(folder)) throw new Error('Invalid folder');
-  // Allow nested paths but block traversal
   const safe = String(filename || '').replace(/\\/g, '/').replace(/^\/+/, '');
   if (safe.includes('..') || !safe) throw new Error('Invalid filename');
   const folderRoot = path.join(libraryPath, folder);
-  const filepath = path.resolve(folderRoot, safe);
-  if (!filepath.startsWith(folderRoot + path.sep)) throw new Error('Path must stay within ' + folder);
-  if (!fs.existsSync(filepath)) throw new Error(`Not found: ${folder}/${safe}`);
-  return fs.readFileSync(filepath, 'utf8');
+
+  // Try multiple resolutions — write applies sanitization, read should mirror that
+  // so callers don't need to know the on-disk canonical form.
+  const candidates = [
+    safe,                                          // exact as given
+    safe.match(/\.[a-z0-9]+$/i) ? safe : safe + '.md',  // append .md if no extension
+    sanitizeRelativePath(safe)                     // fully sanitized (lowercase, hyphenated, .md)
+  ];
+
+  for (const candidate of candidates) {
+    const filepath = path.resolve(folderRoot, candidate);
+    if (!filepath.startsWith(folderRoot + path.sep)) continue;
+    if (fs.existsSync(filepath)) return fs.readFileSync(filepath, 'utf8');
+  }
+
+  // Last resort: list available files so the model sees what IS there
+  const available = fs.existsSync(folderRoot)
+    ? fs.readdirSync(folderRoot).filter(f => !f.startsWith('.')).slice(0, 20).join(', ')
+    : '(folder empty)';
+  throw new Error(`Not found: ${folder}/${safe}. Available files in ${folder}/: ${available}`);
+}
+
+// ── Library Auto-Recall ────────────────────────────────────────
+// On every Oracle call, scan wiki/ + output/ filenames for word-overlap with the
+// user's message. Top 3 hits get injected into the system prompt as background context.
+const RECALL_STOPWORDS = new Set([
+  'the','and','that','this','with','have','what','when','where','how','why','who','can','will',
+  'should','would','could','about','from','into','your','their','them','they','these','those',
+  'been','being','just','also','than','then','some','more','most','much','many','such','here',
+  'there','want','need','make','made','done','for','are','was','were','its','our','out','not',
+  'but','you','yes','his','her','him','she','one','two','three','any','all','get','got','see'
+]);
+
+function findRelevantLibraryEntries(userMessage, maxResults = 3) {
+  const words = String(userMessage).toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, ' ')
+    .split(/\s+/)
+    .filter(w => w.length >= 3 && !RECALL_STOPWORDS.has(w));
+  if (words.length === 0) return [];
+
+  let allFiles;
+  try { allFiles = libraryList(); } catch { return []; }
+
+  // Crude stemming so "agents" matches "agent", "running" matches "run", etc.
+  const stem = (w) => {
+    if (w.length > 4 && w.endsWith('ing')) return w.slice(0, -3);
+    if (w.length > 4 && w.endsWith('ed'))  return w.slice(0, -2);
+    if (w.length > 3 && w.endsWith('s'))   return w.slice(0, -1);
+    return w;
+  };
+
+  const matches = [];
+  for (const folder of ['wiki', 'output']) {
+    for (const file of (allFiles[folder] || [])) {
+      const haystack = file.toLowerCase().replace(/\.md$/, '').replace(/[-/_]/g, ' ');
+      const score = words.reduce((n, w) => {
+        if (haystack.includes(w)) return n + 1;
+        if (haystack.includes(stem(w))) return n + 1;
+        return n;
+      }, 0);
+      if (score > 0) matches.push({ folder, file, score });
+    }
+  }
+
+  return matches.sort((a, b) => b.score - a.score).slice(0, maxResults);
+}
+
+function buildRecallContext(matches) {
+  if (matches.length === 0) return { context: '', files: [] };
+  let context = '\n\n## RECALLED LIBRARY CONTEXT\n(Auto-fetched based on the user\'s message. Use as background — reference naturally when relevant, don\'t cite verbatim unless asked.)\n';
+  const includedFiles = [];
+  for (const m of matches) {
+    try {
+      let content = libraryRead(m.folder, m.file);
+      // Cap each entry at ~1500 chars to control prompt bloat
+      if (content.length > 1500) content = content.slice(0, 1500) + '\n... [truncated]';
+      context += `\n### library/${m.folder}/${m.file}\n${content}\n`;
+      includedFiles.push(`${m.folder}/${m.file}`);
+    } catch {}
+  }
+  return { context, files: includedFiles };
 }
 
 function libraryWriteAny(relativePath, content) {
   ensureLibrary();
   const safe = String(relativePath || '').replace(/\\/g, '/').replace(/^\/+/, '');
   if (!safe || safe.includes('..')) throw new Error('Invalid path');
-  const fullPath = path.resolve(libraryPath, safe);
-  if (!fullPath.startsWith(libraryPath + path.sep)) throw new Error('Path must be within library/');
-  // Sanitize each path segment but keep slashes and extension
-  const parts = safe.split('/');
-  const sanitized = parts.map((part, i) => {
-    if (i === parts.length - 1) {
-      const m = part.match(/^(.+?)(\.[a-z0-9]+)?$/i);
-      const base = (m?.[1] || part).replace(/[^a-z0-9-_]/gi, '-').replace(/-+/g, '-').replace(/^-|-$/g, '').toLowerCase() || 'untitled';
-      const ext = m?.[2] || '.md';
-      return base + ext;
-    }
-    return part.replace(/[^a-z0-9-_]/gi, '-').replace(/-+/g, '-').replace(/^-|-$/g, '').toLowerCase();
-  }).filter(Boolean).join('/');
+  const sanitized = sanitizeRelativePath(safe);
   const sanitizedFull = path.resolve(libraryPath, sanitized);
   if (!sanitizedFull.startsWith(libraryPath + path.sep)) throw new Error('Path resolution failed');
   fs.mkdirSync(path.dirname(sanitizedFull), { recursive: true });
@@ -202,6 +280,7 @@ async function runAgentWithReaders(agent, userMessage, history) {
   const system = agent.system_prompt + READER_PROMPT_SUFFIX;
 
   for (let turn = 0; turn < 4; turn++) {
+    messages = sanitizeHistory(messages);
     const response = await client.messages.create({
       model: 'claude-sonnet-4-6',
       max_tokens: 2048,
@@ -262,7 +341,9 @@ Answer the specialist's question briefly and decisively — they need direction,
 }
 
 async function runConsultation(specialist, query, oracle, userQuery, event) {
-  let messages = [{ role: 'user', content: query }];
+  const memory = loadMemory();
+  const priorHistory = memory[specialist.id] || [];
+  let messages = [...priorHistory, { role: 'user', content: query }];
   const tools = [...READER_TOOLS, ASK_ORACLE_TOOL];
   const system = specialist.system_prompt + READER_PROMPT_SUFFIX + `
 
@@ -270,6 +351,7 @@ You may use ask_oracle AT MOST ONCE per consultation, only if the request is gen
   let askOracleUsed = false;
 
   for (let turn = 0; turn < 4; turn++) {
+    messages = sanitizeHistory(messages);
     const response = await client.messages.create({
       model: 'claude-sonnet-4-6',
       max_tokens: 2048,
@@ -281,6 +363,8 @@ You may use ask_oracle AT MOST ONCE per consultation, only if the request is gen
     messages.push({ role: 'assistant', content: response.content });
 
     if (response.stop_reason !== 'tool_use') {
+      memory[specialist.id] = trimByTokenBudget(messages);
+      saveMemory(memory);
       return response.content.filter(b => b.type === 'text').map(b => b.text).join('\n').trim();
     }
 
@@ -311,6 +395,8 @@ You may use ask_oracle AT MOST ONCE per consultation, only if the request is gen
     }
     messages.push({ role: 'user', content: results });
   }
+  memory[specialist.id] = trimByTokenBudget(messages);
+  saveMemory(memory);
   return '(consultation iteration limit reached)';
 }
 
@@ -345,19 +431,79 @@ function loadMemory() {
   } catch { return {}; }
 }
 
-// Drop leading orphan tool_result blocks — happens when slice(-40) cuts mid-tool-sequence.
-// API rejects any tool_result without a matching tool_use in the prior message.
+// Strip both orphan tool_result (at start) AND orphan tool_use (at end).
+// Anthropic API: every tool_use must be followed by a matching tool_result, and
+// every tool_result must follow a matching tool_use. Mid-loop saves can leave
+// either side dangling; both forms cause 400 errors.
 function sanitizeHistory(msgs) {
   if (!Array.isArray(msgs)) return [];
-  while (msgs.length > 0) {
-    const m0 = msgs[0];
-    const isOrphan = m0.role === 'user'
-      && Array.isArray(m0.content)
-      && m0.content.some(b => b && b.type === 'tool_result');
-    if (!isOrphan) break;
-    msgs.shift();
+
+  // First pass: collect all tool_use IDs and all tool_result IDs across the whole history.
+  const toolUseIds = new Set();
+  const toolResultIds = new Set();
+  for (const m of msgs) {
+    if (!Array.isArray(m.content)) continue;
+    for (const b of m.content) {
+      if (b && b.type === 'tool_use' && b.id) toolUseIds.add(b.id);
+      if (b && b.type === 'tool_result' && b.tool_use_id) toolResultIds.add(b.tool_use_id);
+    }
   }
-  return msgs;
+  // Orphan IDs in either direction
+  const orphanUseIds = new Set([...toolUseIds].filter(id => !toolResultIds.has(id)));
+  const orphanResultIds = new Set([...toolResultIds].filter(id => !toolUseIds.has(id)));
+
+  // Second pass: rewrite each message, dropping orphan blocks. Drop the whole message
+  // if it becomes empty content after filtering.
+  const cleaned = [];
+  for (const m of msgs) {
+    if (!Array.isArray(m.content)) { cleaned.push(m); continue; }
+    const filtered = m.content.filter(b => {
+      if (!b) return false;
+      if (b.type === 'tool_use' && orphanUseIds.has(b.id)) return false;
+      if (b.type === 'tool_result' && orphanResultIds.has(b.tool_use_id)) return false;
+      return true;
+    });
+    if (filtered.length === 0) continue;
+    cleaned.push({ ...m, content: filtered });
+  }
+
+  // Third pass: trim boundaries — drop leading user(tool_result) and trailing assistant(tool_use)
+  // that can still occur if a slice chopped a pair (orphan detection only catches missing partners
+  // when at least one of the pair is present in the surviving slice).
+  while (cleaned.length > 0) {
+    const first = cleaned[0];
+    if (first.role === 'user' && Array.isArray(first.content) && first.content.some(b => b.type === 'tool_result')) {
+      cleaned.shift(); continue;
+    }
+    break;
+  }
+  while (cleaned.length > 0) {
+    const last = cleaned[cleaned.length - 1];
+    if (last.role === 'assistant' && Array.isArray(last.content) && last.content.some(b => b.type === 'tool_use')) {
+      cleaned.pop(); continue;
+    }
+    break;
+  }
+
+  return cleaned;
+}
+
+// Trim history to a token budget (rough estimate: 4 chars/token) so we use the
+// full Sonnet 4.6 context window (~200K) instead of a fixed message count.
+// Leaves headroom for system prompt, tools, and the model's reply.
+const HISTORY_TOKEN_BUDGET = 150000;
+function trimByTokenBudget(msgs, budget = HISTORY_TOKEN_BUDGET) {
+  if (!Array.isArray(msgs) || msgs.length === 0) return [];
+  const charBudget = budget * 4;
+  let total = 0;
+  const kept = [];
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const size = JSON.stringify(msgs[i]).length;
+    if (total + size > charBudget && kept.length > 0) break;
+    total += size;
+    kept.unshift(msgs[i]);
+  }
+  return kept;
 }
 
 function saveMemory(memory) {
@@ -381,6 +527,7 @@ function createWindow() {
   });
 
   mainWindow.loadFile(path.join(__dirname, 'src', 'index.html'));
+  mainWindow.maximize();
 }
 
 app.whenReady().then(createWindow);
@@ -423,17 +570,29 @@ You maintain a markdown Library at /library/ structured as an Obsidian vault:
 
 You can also create nested subfolders for organization via create_file (e.g. "wiki/projects/agent-center.md", "raw/conversations/2026-05-26.md", "output/summaries/weekly.md"). Use the simple log_to_raw/update_wiki/save_output for flat files; use create_file when hierarchy helps.
 
-MANDATORY WORKFLOW for capturing knowledge:
-1. Call list_library FIRST to see what exists (avoid duplicates, find notes to extend).
-2. Write the raw observation to raw/ via log_to_raw or create_file.
-3. IMMEDIATELY AFTER any raw write, you MUST update or create the corresponding wiki/ entry that synthesizes the raw note into organized, cross-linked knowledge. Never leave a raw note un-ingested. If a relevant wiki note already exists, update it; if not, create one with [[backlinks]].
-4. Save generated deliverables to output/.
+MANDATORY WORKFLOW for capturing knowledge (5 steps — do not skip):
 
-This raw → wiki ingestion is non-negotiable — the wiki is what makes the library useful; raw alone is just a dump. After both writes are done, give the user a brief confirmation of what was logged and synthesized.`;
+1. **SCAN** — Call list_library to see all existing files.
+
+2. **READ RELATED** — From that list, identify the 2-4 notes (across raw/ and wiki/) most likely to share themes, projects, or entities with the new content. Call read_library on each. This is non-negotiable: backlinks must be grounded in what the linked notes ACTUALLY say, not inferred from filenames. If a name looks related but the contents aren't, do NOT backlink to it.
+
+3. **WRITE RAW** — Save the new observation via log_to_raw or create_file.
+
+4. **SYNTHESIZE WIKI** — Update or create the matching wiki/ entry. Use [[backlinks]] ONLY to notes you read in step 2 and confirmed are genuinely related. In the wiki entry, explicitly note:
+   - What patterns this connects to (cite the [[backlinked]] notes by name)
+   - Any contradictions or shifts from prior notes (e.g., "Earlier [[pass-1-intake]] said X; this entry refines that to Y")
+   - What new questions this raises
+
+5. **REVERSE BACKLINKS** — For each [[backlinked]] wiki note you added in step 4, call update_wiki on THAT note to add a reverse [[backlink]] pointing to the new entry. Connections must be bidirectional — otherwise the graph is broken. If a backlinked note is in raw/ (not wiki/), skip the reverse link for that one (raw is append-only intake; only wiki gets cross-linked).
+
+After all five steps, give the user a brief confirmation: what raw was logged, what wiki was synthesized, which notes you read for context, and which reverse backlinks you added.
+
+Save deliverables to output/ as a separate concern (no workflow obligation).`;
 
   const model = opts.model || 'claude-sonnet-4-6';
 
-  for (let turn = 0; turn < 8; turn++) {
+  for (let turn = 0; turn < 14; turn++) {
+    messages = sanitizeHistory(messages);
     const response = await client.messages.create({
       model,
       max_tokens: 2048,
@@ -447,7 +606,7 @@ This raw → wiki ingestion is non-negotiable — the wiki is what makes the lib
     if (response.stop_reason !== 'tool_use') {
       const finalText = response.content.filter(b => b.type === 'text').map(b => b.text).join('\n').trim();
       if (!opts.stateless) {
-        memory[agent.id] = messages.slice(-40);
+        memory[agent.id] = trimByTokenBudget(messages);
         saveMemory(memory);
       }
       return finalText || '(logged)';
@@ -483,7 +642,10 @@ This raw → wiki ingestion is non-negotiable — the wiki is what makes the lib
           result = 'Unknown tool';
         }
         if (isRawWrite) {
-          result += '\n\n[WORKFLOW] You MUST now update or create the matching wiki/ note that synthesizes this raw entry before responding to the user. Call list_library first if you need to find an existing wiki note to extend, then call update_wiki (or create_file targeting wiki/).';
+          result += '\n\n[WORKFLOW] Steps 4 & 5 remaining: (4) Synthesize the wiki/ entry now with [[backlinks]] ONLY to notes you read in step 2. Note any patterns, contradictions, and new questions. (5) For each [[backlinked]] wiki note, call update_wiki on THAT note to add a reverse [[backlink]] — bidirectional or it doesn\'t count.';
+        }
+        if (call.name === 'update_wiki') {
+          result += '\n\n[WORKFLOW] If this wiki note added new [[backlinks]] to other wiki notes, you must now update_wiki on each of those to add a reverse [[backlink]] pointing to this one. Skip raw/ targets.';
         }
         toolResults.push({ type: 'tool_result', tool_use_id: call.id, content: result });
       } catch (err) {
@@ -495,7 +657,7 @@ This raw → wiki ingestion is non-negotiable — the wiki is what makes the lib
   }
 
   if (!opts.stateless) {
-    memory[agent.id] = messages.slice(-40);
+    memory[agent.id] = trimByTokenBudget(messages);
     saveMemory(memory);
   }
   return 'Reached tool limit.';
@@ -513,7 +675,7 @@ ipcMain.handle('chat:send', async (event, { agentId, message }) => {
   const memory = loadMemory();
   const history = memory[agentId] || [];
   const { reply, messages } = await runAgentWithReaders(agent, message, history);
-  memory[agentId] = messages.slice(-40);
+  memory[agentId] = trimByTokenBudget(messages);
   saveMemory(memory);
 
   autoLog(event, `Direct conversation with ${agent.name} (${agent.title}).
@@ -567,37 +729,110 @@ You also have read-only access to a shared knowledge library at /library/ via li
 
 DEFAULT to answering directly — the user is talking to YOU. Only consult a specialist when the task clearly needs their specific expertise. You may consult multiple specialists in sequence or parallel. After consultations, synthesize their input into your final response — don't just relay it.
 
-For casual chat, questions, opinions, brainstorming, explanations — just answer.`;
+For casual chat, questions, opinions, brainstorming, explanations — just answer.
+
+CRITICAL — no promised-but-uncalled tools:
+If you tell the user you're going to do something via a tool ("I'll have Hermes log this", "let me check the library", "I'll consult Forge"), you MUST make that tool call in the SAME turn, BEFORE your reply ends. Never describe an action in past or future tense unless the tool call is actually being made or has already been made in this conversation.
+
+Specifically: if your reply mentions documenting, logging, archiving, or having Hermes save anything, call consult_hermes in the same turn with the documentation request. Don't say "Hermes will document this" and then stop — that's a hallucination, not an action. If you don't intend to actually call Hermes, don't mention him.
+
+A background auto-logging system exists but it's invisible to you and to the user. Don't reference it. Don't credit it. If documentation matters enough to mention, do it yourself via consult_hermes.`;
+
+  // Auto-recall: pull relevant wiki entries based on the user's message
+  const recalled = findRelevantLibraryEntries(message);
+  const { context: recallContext, files: recalledFiles } = buildRecallContext(recalled);
+  if (recalledFiles.length > 0) {
+    event.sender.send('chat:recall', { files: recalledFiles });
+  }
+  const orchestrationSystemWithRecall = orchestrationSystem + recallContext;
 
   const history = memory['oracle'] || [];
   let messages = [...history, { role: 'user', content: message }];
   const consultations = [];
 
-  for (let turn = 0; turn < 5; turn++) {
-    // Signal renderer that a new Oracle text stream is starting (so it can open a fresh bubble)
+  // One transparent retry on transient API errors (connection drops, 429, 5xx).
+  // Skips retry if we already started streaming text — the user has seen partial output.
+  const shouldRetry = (err) => {
+    const status = err?.status || err?.statusCode;
+    if (status === 400 || status === 401 || status === 403) return false;
+    return true;
+  };
+
+  for (let turn = 0; turn < 7; turn++) {
     event.sender.send('chat:stream-start', { turn });
 
-    const stream = client.messages.stream({
-      model: 'claude-sonnet-4-6',
-      max_tokens: 2048,
-      system: orchestrationSystem,
-      tools,
-      messages
-    });
+    let response;
+    let textEmitted = false;
+    // Defensive: sanitize before every API call so a mid-loop orphan tool_use/tool_result
+    // pair can't reach the API and trigger a 400. Mutates `messages` in place via reassignment.
+    messages = sanitizeHistory(messages);
+    const runStream = async () => {
+      const stream = client.messages.stream({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 2048,
+        system: orchestrationSystemWithRecall,
+        tools,
+        messages
+      });
+      stream.on('text', (delta) => {
+        textEmitted = true;
+        event.sender.send('chat:stream-delta', { delta });
+      });
+      return await stream.finalMessage();
+    };
 
-    // Push each text delta to renderer as it arrives
-    stream.on('text', (delta) => {
-      event.sender.send('chat:stream-delta', { delta });
-    });
+    try {
+      response = await runStream();
+    } catch (err) {
+      if (shouldRetry(err) && !textEmitted) {
+        await new Promise(r => setTimeout(r, 800));
+        response = await runStream();
+      } else {
+        throw err;
+      }
+    }
 
-    const response = await stream.finalMessage();
     event.sender.send('chat:stream-end', { turn });
 
     messages.push({ role: 'assistant', content: response.content });
 
     if (response.stop_reason !== 'tool_use') {
-      const finalText = response.content.filter(b => b.type === 'text').map(b => b.text).join('\n').trim();
-      memory['oracle'] = messages.slice(-40);
+      let finalText = response.content.filter(b => b.type === 'text').map(b => b.text).join('\n').trim();
+
+      // Enforcement: if Oracle's text promises a Hermes/documentation action in future/present tense
+      // but didn't actually call consult_hermes this turn, fire Hermes from the backend so the
+      // promise actually happens. No loop-back — that caused runaway iterations.
+      const promisesHermes = /\b(hermes\b|documenting|logging|archiving|committ\w*|hand\w+ (off|to|over) to)\b/i.test(finalText)
+        && /\b(will|i'?ll|going to|let me|about to|now|asking|sending|handing)\b/i.test(finalText);
+      const calledHermes = consultations.some(c => c.agentId === 'hermes');
+      if (promisesHermes && !calledHermes) {
+        const hermes = specialists.find(s => s.id === 'hermes');
+        if (hermes) {
+          event.sender.send('chat:consulting', {
+            agentId: hermes.id, agentName: hermes.name,
+            agentEmoji: hermes.emoji, agentColor: hermes.color,
+            query: '[auto-dispatch] documenting Oracle\'s promised action'
+          });
+          try {
+            const docQuery = `Oracle just told the user: "${finalText}"\n\nUser had asked: ${message}\n\nConsultations this turn:\n${consultations.map(c => `- ${c.agentName}: ${c.reply.slice(0, 500)}`).join('\n') || '(none)'}\n\nRun your full 5-step workflow to document this exchange.`;
+            const hermesReply = await runHermes(event, hermes, docQuery, { stateless: false });
+            event.sender.send('chat:consulted', {
+              agentId: hermes.id, agentName: hermes.name,
+              agentEmoji: hermes.emoji, agentColor: hermes.color,
+              reply: hermesReply
+            });
+            consultations.push({
+              agentId: hermes.id, agentName: hermes.name,
+              agentEmoji: hermes.emoji, agentColor: hermes.color,
+              query: docQuery, reply: hermesReply
+            });
+          } catch (err) {
+            console.error('[auto-hermes]', err.message);
+          }
+        }
+      }
+
+      memory['oracle'] = trimByTokenBudget(messages);
       saveMemory(memory);
 
       const consultSummary = consultations.map(c => `- ${c.agentName}: ${c.reply.slice(0, 400)}`).join('\n');
@@ -654,7 +889,7 @@ Log if this captures a decision, recurring theme, useful pattern, project contex
     messages.push({ role: 'user', content: toolResults });
   }
 
-  memory['oracle'] = messages.slice(-40);
+  memory['oracle'] = trimByTokenBudget(messages);
   saveMemory(memory);
   return { finalReply: 'Reached consultation limit. Try a more focused question.', consultations };
 });
@@ -676,7 +911,7 @@ ipcMain.handle('chat:send-all', async (_, { message }) => {
     });
 
     const reply = response.content[0].text;
-    memory[agent.id] = [...messages, { role: 'assistant', content: reply }].slice(-40);
+    memory[agent.id] = trimByTokenBudget([...messages, { role: 'assistant', content: reply }]);
     return { agentId: agent.id, name: agent.name, emoji: agent.emoji, color: agent.color, reply };
   }));
 

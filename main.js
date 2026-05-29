@@ -105,8 +105,10 @@ function libraryRead(folder, filename) {
 }
 
 // ── Library Auto-Recall ────────────────────────────────────────
-// On every Oracle call, scan wiki/ + output/ filenames for word-overlap with the
-// user's message. Top 3 hits get injected into the system prompt as background context.
+// On every Oracle call, scan raw/ + wiki/ + output/ — both filenames AND file
+// contents — for word-overlap with the user's message. Top 3 hits get injected
+// into the system prompt. Scoring/IO is local-only; the injection caps in
+// buildRecallContext are unchanged, so token cost stays flat vs. filename-only.
 const RECALL_STOPWORDS = new Set([
   'the','and','that','this','with','have','what','when','where','how','why','who','can','will',
   'should','would','could','about','from','into','your','their','them','they','these','those',
@@ -126,11 +128,17 @@ const RECALL_BLOCKLIST = new Set([
   'wiki/oracle-framework-vs-reality-gap-2025-07-14.md'
 ]);
 
+// Max chars of each file scanned when scoring — bounds local IO on any unexpectedly
+// large note. Recall files are small, so this rarely bites.
+const RECALL_SCAN_CHARS = 8000;
+
 function findRelevantLibraryEntries(userMessage, maxResults = 3) {
-  const words = String(userMessage).toLowerCase()
-    .replace(/[^a-z0-9\s-]/g, ' ')
-    .split(/\s+/)
-    .filter(w => w.length >= 3 && !RECALL_STOPWORDS.has(w));
+  const words = [...new Set(
+    String(userMessage).toLowerCase()
+      .replace(/[^a-z0-9\s-]/g, ' ')
+      .split(/\s+/)
+      .filter(w => w.length >= 3 && !RECALL_STOPWORDS.has(w))
+  )];
   if (words.length === 0) return [];
 
   let allFiles;
@@ -143,17 +151,25 @@ function findRelevantLibraryEntries(userMessage, maxResults = 3) {
     if (w.length > 3 && w.endsWith('s'))   return w.slice(0, -1);
     return w;
   };
+  const hasWord = (hay, w) => hay.includes(w) || hay.includes(stem(w));
 
   const matches = [];
-  for (const folder of ['wiki', 'output']) {
+  for (const folder of ['wiki', 'output', 'raw']) {
     for (const file of (allFiles[folder] || [])) {
-      const haystack = file.toLowerCase().replace(/\.md$/, '').replace(/[-/_]/g, ' ');
-      const score = words.reduce((n, w) => {
-        if (haystack.includes(w)) return n + 1;
-        if (haystack.includes(stem(w))) return n + 1;
-        return n;
-      }, 0);
-      if (score > 0 && !RECALL_BLOCKLIST.has(`${folder}/${file}`)) matches.push({ folder, file, score });
+      if (RECALL_BLOCKLIST.has(`${folder}/${file}`)) continue;
+      const nameHay = file.toLowerCase().replace(/\.md$/, '').replace(/[-/_]/g, ' ');
+
+      let bodyHay = '';
+      try { bodyHay = libraryRead(folder, file).toLowerCase().slice(0, RECALL_SCAN_CHARS); } catch {}
+
+      // Filename hits weigh more than body hits — a note titled for the topic is
+      // more relevant than one that merely mentions the word in passing.
+      let score = 0;
+      for (const w of words) {
+        if (hasWord(nameHay, w)) score += 2;
+        else if (bodyHay && hasWord(bodyHay, w)) score += 1;
+      }
+      if (score > 0) matches.push({ folder, file, score });
     }
   }
 

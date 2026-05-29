@@ -942,7 +942,10 @@ For casual chat, questions, opinions, brainstorming, explanations — just answe
 
 Logging is YOUR judgment call. There is no background auto-logger. After answering, decide whether this exchange contains something worth preserving — a decision, preference, recurring pattern, project context, named entity, or anything the user would want to recall later. If yes, call consult_hermes in the same turn with a clear documentation request. If the exchange is purely conversational, casual, or trivial, do not call Hermes. Err on the side of NOT logging unless there's a concrete reason to.
 
-When you write consultation queries to specialists, be tight — give the specialist the user's actual ask and the minimum context they need, no more. Don't paste your own preamble into the query; they don't need it.` + OUTPUT_DISCIPLINE;
+When you write consultation queries to specialists, the cheap thing is not LESS context — it's better-SHAPED context. Don't paste your own preamble, but DO shape every query with these three rules:
+1. State the constraint — name what is FIXED and what is VARIABLE. Don't make the specialist guess which dimension you're optimizing.
+2. Provide structure, not narrative — prefer bullets, labeled fields, explicit trade-offs over prose. If you can't structure it, you don't understand the ask yet.
+3. Ground it in prior decisions — reference the last relevant decision, metric, or finding (lean on RECALLED LIBRARY CONTEXT when present): "Last time we found X — does this fit or contradict?" A specialist working from a baseline compresses straight to useful work; one working in a vacuum restarts from zero.` + OUTPUT_DISCIPLINE;
 
   // Skip auto-recall for trivial messages — saves ~1100 input tokens per call when
   // the user is just acknowledging or saying hi. Recall adds zero value here.

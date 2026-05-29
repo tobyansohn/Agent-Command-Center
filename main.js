@@ -188,6 +188,36 @@ function libraryWriteAny(relativePath, content) {
   return 'library/' + sanitized;
 }
 
+function resolveLibraryPath(relativePath) {
+  const safe = String(relativePath || '').replace(/\\/g, '/').replace(/^\/+/, '');
+  if (!safe || safe.includes('..')) throw new Error('Invalid path');
+  const sanitized = sanitizeRelativePath(safe);
+  const full = path.resolve(libraryPath, sanitized);
+  if (!full.startsWith(libraryPath + path.sep)) throw new Error('Path resolution failed');
+  return { sanitized, full };
+}
+
+function libraryMove(fromPath, toPath) {
+  ensureLibrary();
+  const src = resolveLibraryPath(fromPath);
+  const dst = resolveLibraryPath(toPath);
+  if (!fs.existsSync(src.full)) throw new Error(`Source not found: library/${src.sanitized}`);
+  if (fs.existsSync(dst.full)) throw new Error(`Destination already exists: library/${dst.sanitized} — choose another name or delete the existing file first`);
+  fs.mkdirSync(path.dirname(dst.full), { recursive: true });
+  fs.renameSync(src.full, dst.full);
+  return { from: 'library/' + src.sanitized, to: 'library/' + dst.sanitized };
+}
+
+function libraryDelete(relativePath) {
+  ensureLibrary();
+  const target = resolveLibraryPath(relativePath);
+  if (!fs.existsSync(target.full)) throw new Error(`Not found: library/${target.sanitized}`);
+  const stat = fs.statSync(target.full);
+  if (stat.isDirectory()) throw new Error(`Refusing to delete a directory: library/${target.sanitized}. Delete files individually.`);
+  fs.unlinkSync(target.full);
+  return 'library/' + target.sanitized;
+}
+
 const HERMES_TOOLS = [
   {
     name: 'log_to_raw',
@@ -253,6 +283,29 @@ const HERMES_TOOLS = [
       },
       required: ['folder', 'filename']
     }
+  },
+  {
+    name: 'move_file',
+    description: 'Move or rename a file within the library. Use to reorganize files into subfolders, rename for clarity, or promote a raw note into wiki/. Both paths must be inside library/ and start with raw/, wiki/, or output/. Parent folders for the destination are auto-created. Will fail if the destination already exists — read+merge then delete, or rename to a free path. Updating [[backlinks]] in other notes that reference the moved file is YOUR responsibility (use list_library + read_library + update_wiki).',
+    input_schema: {
+      type: 'object',
+      properties: {
+        from: { type: 'string', description: 'Current relative path under library/. Example: "raw/2026-05-26-meeting.md"' },
+        to:   { type: 'string', description: 'New relative path under library/. Example: "wiki/projects/agent-center/meetings.md"' }
+      },
+      required: ['from', 'to']
+    }
+  },
+  {
+    name: 'delete_file',
+    description: 'Permanently delete a single file from the library. IRREVERSIBLE — there is no trash. RESERVED for files you created in error THIS turn (e.g. you typo\'d a filename, then immediately re-created with the correct name). For any older file, you MUST use move_file to relocate it into a deprecated/ subfolder (e.g. wiki/deprecated/old-note.md, raw/deprecated/2025-stale.md) instead of deleting. Directories cannot be deleted. If you are not certain the file is one you just created this turn, do not call delete_file — call move_file into deprecated/ instead.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Relative path under library/. Must start with raw/, wiki/, or output/. Example: "raw/typo-filename.md"' }
+      },
+      required: ['path']
+    }
   }
 ];
 
@@ -276,9 +329,25 @@ const READER_TOOLS = [
   }
 ];
 
+const OUTPUT_DISCIPLINE = `
+
+## Output discipline
+
+Lead with the answer, not the lead-up. Match length to the question — short answers for short questions, longer only when the content genuinely needs it.
+
+Skip:
+- Filler preambles ("Great question!", "I'd be happy to help", "Let me think about this")
+- Restating the user's question back at them
+- Padded conclusions ("In summary…", "Hope this helps!", "Let me know if you have questions!")
+- Hedging that doesn't change the answer ("It's worth noting that…", "I should mention…")
+- Bullet lists when one sentence works
+- Code fences without language identifiers
+
+When you genuinely don't know or can't tell, say so in one line — don't manufacture confident-sounding filler. Output tokens are ~3x the cost of input tokens; every paragraph you write costs something. Be useful, not wordy.`;
+
 const READER_PROMPT_SUFFIX = `
 
-You have read-only access to a shared knowledge library at /library/. ONLY call list_library when you have a specific reason to believe prior context exists that would meaningfully change your answer (e.g. the user references "the project", "what we decided", "last time"). For most requests, just answer directly without checking — the library is a recall tool, not a default lookup. Hermes maintains the library; you don't write to it.`;
+You have read-only access to a shared knowledge library at /library/. ONLY call list_library when you have a specific reason to believe prior context exists that would meaningfully change your answer (e.g. the user references "the project", "what we decided", "last time"). For most requests, just answer directly without checking — the library is a recall tool, not a default lookup. Hermes maintains the library; you don't write to it.` + OUTPUT_DISCIPLINE;
 
 function handleReaderTool(call) {
   if (call.name === 'list_library') return JSON.stringify(libraryList(), null, 2);
@@ -363,13 +432,17 @@ You may use ask_oracle AT MOST ONCE per consultation, only if the request is gen
 
   for (let turn = 0; turn < 4; turn++) {
     messages = sanitizeHistory(messages);
-    const response = await client.messages.create({
+    const stream = client.messages.stream({
       model: 'claude-haiku-4-5-20251001',
       max_tokens: 1024,
       system,
       tools,
       messages
     });
+    stream.on('text', (delta) => {
+      event?.sender.send('chat:consult-delta', { agentId: specialist.id, delta });
+    });
+    const response = await stream.finalMessage();
 
     messages.push({ role: 'assistant', content: response.content });
 
@@ -568,6 +641,16 @@ ipcMain.handle('memory:clear', (_, agentId) => {
   return true;
 });
 
+ipcMain.handle('library:list', () => libraryList());
+
+ipcMain.handle('library:read', (_, { folder, filename }) => {
+  try {
+    return { ok: true, content: libraryRead(folder, filename) };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
 // Build a substantive Hermes reply summarizing what he actually did. Replaces
 // the old "(logged)" stub so Oracle has real content to synthesize from.
 function formatHermesReturn(finalText, actions) {
@@ -575,7 +658,9 @@ function formatHermesReturn(finalText, actions) {
   if (finalText) lines.push(finalText);
   const writes = actions.wrote || [];
   const reads = actions.read || [];
-  if (writes.length === 0 && reads.length === 0) {
+  const moves = actions.moved || [];
+  const deletes = actions.deleted || [];
+  if (writes.length === 0 && reads.length === 0 && moves.length === 0 && deletes.length === 0) {
     return finalText || '(no action taken)';
   }
   const summary = [];
@@ -587,6 +672,8 @@ function formatHermesReturn(finalText, actions) {
   if (wikis.length)   summary.push(`Synthesized ${wikis.length} wiki entry/entries: ${wikis.join(', ')}`);
   if (outputs.length) summary.push(`Saved ${outputs.length} output file(s): ${outputs.join(', ')}`);
   if (otherWrites.length) summary.push(`Wrote: ${otherWrites.join(', ')}`);
+  if (moves.length)   summary.push(`Moved ${moves.length} file(s): ${moves.map(m => `${m.from} -> ${m.to}`).join(', ')}`);
+  if (deletes.length) summary.push(`Deleted ${deletes.length} file(s): ${deletes.join(', ')}`);
   if (reads.length)   summary.push(`Read for context: ${reads.join(', ')}`);
   if (lines.length === 0) lines.push(summary.join('\n'));
   else lines.push('\n— actions —\n' + summary.join('\n'));
@@ -629,7 +716,48 @@ MANDATORY WORKFLOW for capturing knowledge (5 steps — do not skip):
 
 After all five steps, give the user a brief confirmation: what raw was logged, what wiki was synthesized, which notes you read for context, and which reverse backlinks you added.
 
-Save deliverables to output/ as a separate concern (no workflow obligation).`;
+Save deliverables to output/ as a separate concern (no workflow obligation).
+
+## WRITING QUALITY RULES (apply to every file you write)
+
+**Triage first.** Before writing anything, ask: is this content I'd want to reread in three months? If not, skip it. The library is for durable knowledge, not transcript dumps. Trivial chitchat, casual acks, and ephemeral status messages do NOT belong in raw/ or wiki/.
+
+**Update over create.** If list_library shows a file already covering this topic, update_wiki on the existing entry. Creating a near-duplicate fragments the graph and wastes tokens. New file = new topic, not new session.
+
+**Density over length.** A good wiki entry is the shortest version that preserves the insight. No restating the obvious. No "this note is about X" preambles — the filename and first heading do that. No filler conclusions like "in summary…" — if it earned a summary, it earned a wiki entry of its own.
+
+**Structure every file the same way** so the graph stays navigable:
+\`\`\`
+# <Concise title — what this note IS, not "Notes on X">
+
+**Date:** YYYY-MM-DD
+**Topic:** one-line context
+
+## What
+
+The core fact, decision, pattern, or observation. 1–4 sentences.
+
+## Why it matters
+
+Why this is worth remembering. Connect to broader context. 1–3 sentences.
+
+## Connections
+
+- [[other-note]] — one-line relationship
+- [[another-note]] — one-line relationship
+
+## Open questions (optional)
+
+- Anything unresolved that future-you should chase down.
+\`\`\`
+
+Skip sections that don't apply. Don't pad. A 6-line note is better than a 60-line note if 6 lines is enough.
+
+**Raw notes are even tighter** — they're append-only intake, not polished prose. A raw note is 3–10 lines: what happened, when, who/what was involved, and a one-line "why this might matter later." That's it.
+
+**Cost discipline.** Output tokens are the expensive ones. Every paragraph you write costs ~3x what reading the equivalent costs. Don't generate prose to fill space. Don't rewrite an existing entry if a one-line append would do.
+
+**Filename hygiene.** kebab-case, descriptive, no dates in filenames except for raw daily logs. Bad: \`new-note-2.md\`, \`thoughts.md\`. Good: \`oracle-tool-execution.md\`, \`agent-roster.md\`.`;
 
   const model = opts.model || 'claude-haiku-4-5-20251001';
 
@@ -637,7 +765,7 @@ Save deliverables to output/ as a separate concern (no workflow obligation).`;
     messages = sanitizeHistory(messages);
     const response = await client.messages.create({
       model,
-      max_tokens: 2048,
+      max_tokens: 8192,
       system: systemPrompt,
       tools: HERMES_TOOLS,
       messages
@@ -684,7 +812,21 @@ Save deliverables to output/ as a separate concern (no workflow obligation).`;
           result = JSON.stringify(libraryList(), null, 2);
         } else if (call.name === 'read_library') {
           result = libraryRead(call.input.folder, call.input.filename);
+          const readPath = `library/${call.input.folder}/${call.input.filename}.md`;
+          event?.sender.send('hermes:file', { action: 'read', path: readPath });
           actions.read.push(`${call.input.folder}/${call.input.filename}`);
+        } else if (call.name === 'move_file') {
+          const moved = libraryMove(call.input.from, call.input.to);
+          result = `Moved ${moved.from} -> ${moved.to}`;
+          event?.sender.send('hermes:file', { action: 'move', path: moved.to, from: moved.from });
+          actions.moved = actions.moved || [];
+          actions.moved.push(moved);
+        } else if (call.name === 'delete_file') {
+          const deleted = libraryDelete(call.input.path);
+          result = `Deleted ${deleted}`;
+          event?.sender.send('hermes:file', { action: 'delete', path: deleted });
+          actions.deleted = actions.deleted || [];
+          actions.deleted.push(deleted);
         } else {
           result = 'Unknown tool';
         }
@@ -782,7 +924,9 @@ DEFAULT to answering directly — the user is talking to YOU. Only consult a spe
 
 For casual chat, questions, opinions, brainstorming, explanations — just answer.
 
-Logging is YOUR judgment call. There is no background auto-logger. After answering, decide whether this exchange contains something worth preserving — a decision, preference, recurring pattern, project context, named entity, or anything the user would want to recall later. If yes, call consult_hermes in the same turn with a clear documentation request. If the exchange is purely conversational, casual, or trivial, do not call Hermes. Err on the side of NOT logging unless there's a concrete reason to.`;
+Logging is YOUR judgment call. There is no background auto-logger. After answering, decide whether this exchange contains something worth preserving — a decision, preference, recurring pattern, project context, named entity, or anything the user would want to recall later. If yes, call consult_hermes in the same turn with a clear documentation request. If the exchange is purely conversational, casual, or trivial, do not call Hermes. Err on the side of NOT logging unless there's a concrete reason to.
+
+When you write consultation queries to specialists, be tight — give the specialist the user's actual ask and the minimum context they need, no more. Don't paste your own preamble into the query; they don't need it.` + OUTPUT_DISCIPLINE;
 
   // Skip auto-recall for trivial messages — saves ~1100 input tokens per call when
   // the user is just acknowledging or saying hi. Recall adds zero value here.
@@ -992,7 +1136,7 @@ ipcMain.handle('chat:send-all', async (_, { message }) => {
     const response = await client.messages.create({
       model: 'claude-haiku-4-5-20251001',
       max_tokens: 300,
-      system: agent.system_prompt + ' You are speaking in the Grand Council Chamber alongside other agents. Be concise — 2-3 sentences max. Speak from your role.',
+      system: agent.system_prompt + ' You are speaking in the Grand Council Chamber alongside other agents. Be concise — 2-3 sentences max. Speak from your role.' + OUTPUT_DISCIPLINE,
       messages
     });
 

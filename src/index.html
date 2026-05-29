@@ -15,6 +15,7 @@
       <span id="world-title">THE REALM</span>
     </div>
     <div id="titlebar-controls">
+      <button class="win-btn" id="btn-sound" title="Sound off — click to enable">♪</button>
       <button class="win-btn" id="btn-minimize">−</button>
       <button class="win-btn" id="btn-maximize">□</button>
       <button class="win-btn danger" id="btn-close">×</button>
@@ -28,6 +29,8 @@
       <div id="world-map">
         <div id="map-bg"></div>
         <div id="locations-container"></div>
+        <div id="day-night"></div>
+        <svg id="map-beams"></svg>
       </div>
     </div>
 
@@ -37,10 +40,15 @@
     <!-- Sidebar -->
     <div id="sidebar">
 
+      <!-- Oracle's Meridian Line (pulses while a request is processing) -->
+      <div id="meridian"></div>
+
       <!-- Tab Bar -->
       <div id="sidebar-tabs">
         <button class="tab-btn active" data-tab="chat">CHAT</button>
         <button class="tab-btn" data-tab="agents">AGENTS</button>
+        <button class="tab-btn" data-tab="library">LIBRARY</button>
+        <button class="tab-btn" data-tab="outputs">OUTPUTS</button>
         <button class="pixel-btn tab-action" id="btn-gc-expand" title="Toggle fullscreen">⛶</button>
       </div>
 
@@ -64,6 +72,83 @@
         <div id="agent-list"></div>
       </div>
 
+      <!-- Outputs Tab -->
+      <div id="tab-outputs" class="tab-pane">
+        <div class="section-header">
+          <span class="section-title accent">ARTIFACTS</span>
+          <span id="art-count" class="art-count">0</span>
+        </div>
+        <div id="art-controls">
+          <input id="art-search" class="lib-search" placeholder="Search outputs..." />
+          <div id="art-filters" class="art-filters"></div>
+        </div>
+        <div id="art-list"></div>
+      </div>
+
+      <!-- Library Tab -->
+      <div id="tab-library" class="tab-pane">
+        <div class="section-header">
+          <span class="section-title accent">THE LIBRARY</span>
+          <button class="pixel-btn" id="btn-lib-refresh" title="Refresh">⟳</button>
+        </div>
+        <div id="lib-search-wrap">
+          <input id="lib-search" class="lib-search" placeholder="Search files..." />
+        </div>
+        <div id="lib-tree"></div>
+      </div>
+
+    </div>
+
+    <!-- Artifact Expanded Modal -->
+    <div id="art-modal" class="lib-modal" style="display:none;">
+      <div class="lib-modal-inner art-modal-inner">
+        <div class="lib-modal-head">
+          <span id="art-modal-type" class="lib-modal-folder"></span>
+          <span id="art-modal-title" class="lib-modal-file"></span>
+          <button id="btn-art-copy" class="pixel-btn" title="Copy to clipboard">⧉ Copy</button>
+          <button id="btn-art-download" class="pixel-btn" title="Download as .md">↓ .md</button>
+          <button id="btn-art-close" class="pixel-btn" title="Close">✕</button>
+        </div>
+        <div id="art-modal-body" class="lib-modal-body"></div>
+      </div>
+    </div>
+
+    <!-- Command Palette -->
+    <div id="cmd-palette" class="cmd-palette" style="display:none;">
+      <div class="cmd-box">
+        <input id="cmd-input" class="cmd-input" placeholder="Jump to an agent, file, or action…" autocomplete="off" />
+        <div id="cmd-results" class="cmd-results"></div>
+      </div>
+    </div>
+
+    <!-- Direct Agent Chat Modal -->
+    <div id="agent-chat-modal" class="lib-modal" style="display:none;">
+      <div class="lib-modal-inner agent-chat-inner">
+        <div class="lib-modal-head">
+          <span id="ac-modal-emoji"></span>
+          <span id="ac-modal-name" class="lib-modal-file"></span>
+          <button id="btn-ac-clear" class="pixel-btn" title="Clear conversation">⟳ Clear</button>
+          <button id="btn-ac-modal-close" class="pixel-btn" title="Close">✕</button>
+        </div>
+        <div id="ac-modal-messages" class="chat-messages"></div>
+        <div class="chat-input-area">
+          <textarea id="ac-modal-input" class="chat-textarea" placeholder="Message directly..." rows="1"></textarea>
+          <button id="btn-ac-modal-send" class="chat-send">→</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Library Preview Modal -->
+    <div id="lib-modal" class="lib-modal" style="display:none;">
+      <div class="lib-modal-inner">
+        <div class="lib-modal-head">
+          <span id="lib-modal-folder" class="lib-modal-folder"></span>
+          <span id="lib-modal-file" class="lib-modal-file"></span>
+          <button id="btn-lib-mode" class="pixel-btn" title="Toggle reading mode">🌙 Dark</button>
+          <button id="btn-lib-modal-close" class="pixel-btn" title="Close">✕</button>
+        </div>
+        <div id="lib-modal-body" class="lib-modal-body"></div>
+      </div>
     </div>
 
   </div>
